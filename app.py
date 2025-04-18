@@ -6,33 +6,20 @@ from sklearn.linear_model import LinearRegression
 # -----------------------------
 # ページ設定
 # -----------------------------
-st.set_page_config(page_title="金型表面温度推定アプリ", layout="wide")
-st.title("🌡️ 金型内部温度から表面温度を推定するアプリ")
+st.set_page_config(page_title="金型表面温度推定アプリ（時間シフト対応）", layout="wide")
+st.title("🌡️ 金型内部温度から表面温度を推定するアプリ（時間シフト補正版）")
 
 st.markdown("""
-このアプリでは、熱電対による内部温度データから応答補正を行い、  
-さらに温度の変化率（傾き）も加味して、表面温度を推定します。
+このアプリでは、熱電対による内部温度に **時間遅れ（τ）を加味した時間軸シフト補正** を行い、  
+その後、温度と変化率（dT/dt）を使って表面温度を推定します。
 
-**手動モードでは係数 `a`（温度）、`b`（傾き）、`c`（オフセット）を自由に指定できます。**
+**補正式： `T_surface = a × T + b × dT/dt + c`**
 """)
 
 # -----------------------------
 # ファイルアップロード
 # -----------------------------
 uploaded_file = st.file_uploader("📤 ファイルをアップロード（CSVまたはExcel）", type=["csv", "xlsx"])
-
-# -----------------------------
-# 応答補正関数（1次遅れ逆モデル）
-# -----------------------------
-def correct_response(measured, alpha):
-    estimated = [measured.iloc[0]]
-    for t in range(1, len(measured)):
-        try:
-            T_est = (measured.iloc[t] - (1 - alpha) * measured.iloc[t - 1]) / alpha
-        except ZeroDivisionError:
-            T_est = measured.iloc[t]
-        estimated.append(T_est)
-    return estimated
 
 # -----------------------------
 # メイン処理
@@ -69,20 +56,20 @@ if uploaded_file:
     # 応答補正パラメータ
     # -----------------------------
     st.sidebar.header("📐 応答補正設定")
-    tau = st.sidebar.number_input("熱電対の応答遅れ τ [秒]", min_value=0.01, max_value=10.0, value=5.0, step=0.1)
+    tau = st.sidebar.number_input("応答遅れ τ [秒]", min_value=0.01, max_value=10.0, value=5.0, step=0.1)
     dt = st.sidebar.number_input("サンプリング間隔 Δt [秒]", min_value=0.01, max_value=1.0, value=0.1, step=0.01)
-    alpha = dt / (tau + dt)
-    st.sidebar.markdown(f"補正係数 α = `{alpha:.4f}`")
+    shift_steps = int(tau / dt)
+    st.sidebar.markdown(f"時間シフト = {shift_steps} サンプル分先送り")
 
     # -----------------------------
-    # 応答補正・変化率算出
+    # 時間シフトによる遅れ補正
     # -----------------------------
-    df["T_internal_corrected"] = correct_response(df["T_internal"], alpha)
-    df["dT_dt"] = df["T_internal_corrected"].diff() / dt
+    df["T_internal_shifted"] = df["T_internal"].shift(-shift_steps)
+    df["dT_dt"] = df["T_internal_shifted"].diff() / dt
     df.dropna(inplace=True)
 
     # -----------------------------
-    # 推定方法の選択
+    # 推定方法選択
     # -----------------------------
     st.sidebar.header("🛠 表面温度推定モード")
     manual_mode = st.sidebar.checkbox("手動で係数を指定する", value=False)
@@ -92,13 +79,12 @@ if uploaded_file:
         b = st.sidebar.number_input("傾き係数 b（dT/dt）", value=0.0, step=0.1, format="%.2f")
         c = st.sidebar.number_input("オフセット c", value=0.0, step=0.1, format="%.2f")
 
-        df["T_surface_predicted"] = a * df["T_internal_corrected"] + b * df["dT_dt"] + c
-
+        df["T_surface_predicted"] = a * df["T_internal_shifted"] + b * df["dT_dt"] + c
         st.info(f"📌 補正式: `T_surface = {a} × T + {b} × dT/dt + {c}`")
     else:
         model = LinearRegression()
-        model.fit(df[["T_internal_corrected", "dT_dt"]], df["T_surface"])
-        df["T_surface_predicted"] = model.predict(df[["T_internal_corrected", "dT_dt"]])
+        model.fit(df[["T_internal_shifted", "dT_dt"]], df["T_surface"])
+        df["T_surface_predicted"] = model.predict(df[["T_internal_shifted", "dT_dt"]])
         st.success("✅ 自動回帰モデルで表面温度を推定しました")
 
     # -----------------------------
@@ -107,7 +93,7 @@ if uploaded_file:
     st.subheader("📊 推定結果グラフ")
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
-    ax.plot(df["time"], df["T_surface_predicted"], label="推定（補正＋傾き）", linestyle="--")
+    ax.plot(df["time"], df["T_surface_predicted"], label="推定（時間シフト補正）", linestyle="--")
     ax.set_xlabel("時間 [s]")
     ax.set_ylabel("温度 [℃]")
     ax.legend()
@@ -115,14 +101,14 @@ if uploaded_file:
     st.pyplot(fig)
 
     # -----------------------------
-    # テーブル表示＆CSVダウンロード
+    # テーブル表示＆CSV出力
     # -----------------------------
     st.subheader("📋 推定データの一部")
-    st.dataframe(df[["time", "T_internal", "T_internal_corrected", "dT_dt", "T_surface", "T_surface_predicted"]].head(10))
+    st.dataframe(df[["time", "T_internal", "T_internal_shifted", "dT_dt", "T_surface", "T_surface_predicted"]].head(10))
 
     st.download_button(
         label="📥 推定結果をCSVでダウンロード",
         data=df.to_csv(index=False).encode('utf-8'),
-        file_name="estimated_surface_temperature.csv",
+        file_name="estimated_surface_temperature_shift.csv",
         mime='text/csv'
     )
