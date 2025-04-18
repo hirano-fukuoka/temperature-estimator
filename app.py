@@ -2,57 +2,68 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
+from io import BytesIO
 
-st.set_page_config(page_title="金型温度推定アプリ", layout="wide")
+# -----------------------------
+# ページ設定
+# -----------------------------
+st.set_page_config(page_title="金型表面温度推定アプリ", layout="wide")
 st.title("🌡️ 金型内部温度から表面温度を推定するアプリ")
 
-# --- ファイルアップロード ---
-uploaded_file = st.file_uploader("CSVまたはExcelファイルをアップロードしてください", type=["csv", "xlsx"])
+st.markdown("""
+このアプリでは、応答遅れのある熱電対（内部温度）を補正し、  
+高速な赤外線センサーの表面温度を推定します。  
+**CSV または Excel ファイル**をアップロードしてご利用ください。
+""")
 
+# -----------------------------
+# ファイルアップロード
+# -----------------------------
+uploaded_file = st.file_uploader("📤 ファイルをアップロード", type=["csv", "xlsx"])
+
+# -----------------------------
+# 応答補正関数（1次遅れ逆モデル）
+# -----------------------------
+def correct_response(measured, alpha):
+    estimated = [measured.iloc[0]]
+    for t in range(1, len(measured)):
+        try:
+            T_est = (measured.iloc[t] - (1 - alpha) * measured.iloc[t - 1]) / alpha
+        except ZeroDivisionError:
+            T_est = measured.iloc[t]
+        estimated.append(T_est)
+    return estimated
+
+# -----------------------------
+# ファイル読み込み＆処理
+# -----------------------------
 if uploaded_file:
-    # --- ファイルの読み込み ---
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-
-    st.subheader("アップロードされたデータ")
-    st.write(df.head())
-
-    required_columns = {"time", "T_internal", "T_surface"}
-    if not required_columns.issubset(df.columns):
-        st.error(f"列名に {required_columns} を含めてください")
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith('.xlsx'):
+            df = pd.read_excel(uploaded_file, engine="openpyxl")
+        else:
+            st.error("対応していないファイル形式です。CSVまたはExcelを使用してください。")
+            st.stop()
+    except Exception as e:
+        st.error(f"ファイルの読み込みに失敗しました: {e}")
         st.stop()
 
-    # --- パラメータ設定 ---
-    tau = st.slider("熱電対の応答遅れ τ（秒）", 1.0, 10.0, 5.0)
-    dt = st.slider("サンプリング周期 Δt（秒）", 0.5, 5.0, 1.0)
-    alpha = dt / (tau + dt)
+    st.success("✅ ファイルを読み込みました")
+    st.subheader("データプレビュー")
+    st.dataframe(df.head())
 
-    # --- 応答補正関数（逆1次遅れ） ---
-    def correct_response(measured, alpha):
-        estimated = [measured.iloc[0]]
-        for t in range(1, len(measured)):
-            T_est = (measured.iloc[t] - (1 - alpha) * measured.iloc[t - 1]) / alpha
-            estimated.append(T_est)
-        return estimated
+    # -----------------------------
+    # 入力チェック
+    # -----------------------------
+    required_columns = {"time", "T_internal", "T_surface"}
+    if not required_columns.issubset(df.columns):
+        st.error(f"❌ ファイルに以下の列が含まれている必要があります: {required_columns}")
+        st.stop()
 
-    # --- 応答補正処理 ---
-    df["T_internal_corrected"] = correct_response(df["T_internal"], alpha)
-
-    # --- 線形回帰モデルで推定 ---
-    model = LinearRegression()
-    model.fit(df[["T_internal_corrected"]], df["T_surface"])
-    df["T_surface_predicted"] = model.predict(df[["T_internal_corrected"]])
-
-    st.subheader("📈 推定結果プロット")
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
-    ax.plot(df["time"], df["T_surface_predicted"], label="推定（補正後）", linestyle="--")
-    ax.set_xlabel("時間 [s]")
-    ax.set_ylabel("温度 [°C]")
-    ax.legend()
-    st.pyplot(fig)
-
-    st.subheader("📊 推定データの一部")
-    st.dataframe(df[["time", "T_internal", "T_internal_corrected", "T_surface", "T_surface_predicted"]].head())
+    # -----------------------------
+    # パラメータ設定
+    # -----------------------------
+    st.sidebar.header("📐 応答補正パラメータ")
+    tau = st.sidebar.slider("熱電対の応答遅れ τ [秒]", 1.0, 10.0, 5.0)
