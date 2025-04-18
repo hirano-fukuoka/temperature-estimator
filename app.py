@@ -2,24 +2,23 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
+from scipy.optimize import minimize
 
 # -----------------------------
 # ページ設定
 # -----------------------------
-st.set_page_config(page_title="金型表面温度推定アプリ（時間シフト対応）", layout="wide")
-st.title("🌡️ 金型内部温度から表面温度を推定するアプリ（時間シフト補正版）")
+st.set_page_config(page_title="表面温度自動最適化アプリ", layout="wide")
+st.title("🌡️ 内部温度から表面温度を自動最適化推定")
 
 st.markdown("""
-このアプリでは、熱電対による内部温度に **時間遅れ（τ）を加味した時間軸シフト補正** を行い、  
-その後、温度と変化率（dT/dt）を使って表面温度を推定します。
-
-**補正式： `T_surface = a × T + b × dT/dt + c`**
+熱電対の内部温度から、時間シフト＋変化率を考慮し、  
+実測表面温度と誤差が最小になるように係数 `a`, `b`, `c` を**自動で最適化**します。
 """)
 
 # -----------------------------
 # ファイルアップロード
 # -----------------------------
-uploaded_file = st.file_uploader("📤 ファイルをアップロード（CSVまたはExcel）", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("📤 CSV または Excel ファイルをアップロード", type=["csv", "xlsx"])
 
 # -----------------------------
 # メイン処理
@@ -34,10 +33,10 @@ if uploaded_file:
             st.error("CSV または Excel ファイルのみ対応しています。")
             st.stop()
     except Exception as e:
-        st.error(f"❌ ファイルの読み込み中にエラーが発生しました: {e}")
+        st.error(f"❌ 読み込みエラー: {e}")
         st.stop()
 
-    st.success("✅ ファイルを読み込みました")
+    st.success("✅ ファイル読み込み完了")
     st.subheader("データプレビュー")
     st.dataframe(df.head())
 
@@ -46,69 +45,69 @@ if uploaded_file:
     # -----------------------------
     required_columns = {"time", "T_internal", "T_surface"}
     if not required_columns.issubset(df.columns):
-        st.error(f"❌ 以下の列が必要です: {required_columns}")
+        st.error(f"以下の列が必要です: {required_columns}")
         st.stop()
 
-    # 欠損値除去
     df.dropna(subset=["T_internal", "T_surface"], inplace=True)
 
     # -----------------------------
-    # 応答補正パラメータ
+    # 応答補正（時間シフト）
     # -----------------------------
     st.sidebar.header("📐 応答補正設定")
-    tau = st.sidebar.number_input("応答遅れ τ [秒]", min_value=0.01, max_value=10.0, value=5.0, step=0.1)
+    tau = st.sidebar.number_input("応答遅れ τ [秒]", min_value=0.01, max_value=10.0, value=1.5, step=0.1)
     dt = st.sidebar.number_input("サンプリング間隔 Δt [秒]", min_value=0.01, max_value=1.0, value=0.1, step=0.01)
     shift_steps = int(tau / dt)
-    st.sidebar.markdown(f"時間シフト = {shift_steps} サンプル分先送り")
+    st.sidebar.markdown(f"⏩ 時間シフト = {shift_steps} サンプル")
 
-    # -----------------------------
-    # 時間シフトによる遅れ補正
-    # -----------------------------
+    # 内部温度を先送り（時間補正）
     df["T_internal_shifted"] = df["T_internal"].shift(-shift_steps)
     df["dT_dt"] = df["T_internal_shifted"].diff() / dt
     df.dropna(inplace=True)
 
     # -----------------------------
-    # 推定方法選択
+    # 自動最適化の実行
     # -----------------------------
-    st.sidebar.header("🛠 表面温度推定モード")
-    manual_mode = st.sidebar.checkbox("手動で係数を指定する", value=False)
+    st.sidebar.header("⚙️ 自動最適化")
+    run_opt = st.sidebar.button("最適化を実行する")
 
-    if manual_mode:
-        a = st.sidebar.number_input("温度係数 a", value=1.0, step=0.1, format="%.2f")
-        b = st.sidebar.number_input("傾き係数 b（dT/dt）", value=0.0, step=0.1, format="%.2f")
-        c = st.sidebar.number_input("オフセット c", value=0.0, step=0.1, format="%.2f")
+    if run_opt:
+        with st.spinner("最適化中..."):
 
-        df["T_surface_predicted"] = a * df["T_internal_shifted"] + b * df["dT_dt"] + c
-        st.info(f"📌 補正式: `T_surface = {a} × T + {b} × dT/dt + {c}`")
-    else:
-        model = LinearRegression()
-        model.fit(df[["T_internal_shifted", "dT_dt"]], df["T_surface"])
-        df["T_surface_predicted"] = model.predict(df[["T_internal_shifted", "dT_dt"]])
-        st.success("✅ 自動回帰モデルで表面温度を推定しました")
+            def objective(params):
+                a, b, c = params
+                pred = a * df["T_internal_shifted"] + b * df["dT_dt"] + c
+                return ((df["T_surface"] - pred) ** 2).mean()
 
-    # -----------------------------
-    # グラフ表示
-    # -----------------------------
-    st.subheader("📊 推定結果グラフ")
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
-    ax.plot(df["time"], df["T_surface_predicted"], label="推定（時間シフト補正）", linestyle="--")
-    ax.set_xlabel("時間 [s]")
-    ax.set_ylabel("温度 [℃]")
-    ax.legend()
-    ax.grid(True)
-    st.pyplot(fig)
+            res = minimize(objective, x0=[1.0, 0.0, 0.0], method='Nelder-Mead')
 
-    # -----------------------------
-    # テーブル表示＆CSV出力
-    # -----------------------------
-    st.subheader("📋 推定データの一部")
-    st.dataframe(df[["time", "T_internal", "T_internal_shifted", "dT_dt", "T_surface", "T_surface_predicted"]].head(10))
+            a_opt, b_opt, c_opt = res.x
+            df["T_surface_predicted"] = a_opt * df["T_internal_shifted"] + b_opt * df["dT_dt"] + c_opt
 
-    st.download_button(
-        label="📥 推定結果をCSVでダウンロード",
-        data=df.to_csv(index=False).encode('utf-8'),
-        file_name="estimated_surface_temperature_shift.csv",
-        mime='text/csv'
-    )
+        st.success("✅ 最適化完了！")
+        st.info(f"📌 最適係数: `a = {a_opt:.4f}`、`b = {b_opt:.4f}`、`c = {c_opt:.4f}`")
+
+        # -----------------------------
+        # グラフ表示
+        # -----------------------------
+        st.subheader("📊 推定結果グラフ")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
+        ax.plot(df["time"], df["T_surface_predicted"], label="推定（最適化）", linestyle="--")
+        ax.set_xlabel("時間 [s]")
+        ax.set_ylabel("温度 [℃]")
+        ax.legend()
+        ax.grid(True)
+        st.pyplot(fig)
+
+        # -----------------------------
+        # テーブルとCSV出力
+        # -----------------------------
+        st.subheader("📋 推定結果データ")
+        st.dataframe(df[["time", "T_internal", "T_internal_shifted", "dT_dt", "T_surface", "T_surface_predicted"]].head(10))
+
+        st.download_button(
+            label="📥 CSVでダウンロード",
+            data=df.to_csv(index=False).encode('utf-8'),
+            file_name="optimized_surface_temperature.csv",
+            mime='text/csv'
+        )
