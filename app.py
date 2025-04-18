@@ -67,3 +67,47 @@ if uploaded_file:
     # -----------------------------
     st.sidebar.header("📐 応答補正パラメータ")
     tau = st.sidebar.slider("熱電対の応答遅れ τ [秒]", 1.0, 10.0, 5.0)
+    dt = st.sidebar.slider("サンプリング間隔 Δt [秒]", 0.5, 5.0, 1.0)
+    alpha = dt / (tau + dt)
+    st.sidebar.write(f"補正係数 α = `{alpha:.3f}`")
+
+    # -----------------------------
+    # 内部温度の応答補正
+    # -----------------------------
+    df["T_internal_corrected"] = correct_response(df["T_internal"], alpha)
+
+    # -----------------------------
+    # 表面温度推定モデル
+    # -----------------------------
+    model = LinearRegression()
+    model.fit(df[["T_internal_corrected"]], df["T_surface"])
+    df["T_surface_predicted"] = model.predict(df[["T_internal_corrected"]])
+
+    # -----------------------------
+    # グラフ表示
+    # -----------------------------
+    st.subheader("📊 推定結果グラフ")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
+    ax.plot(df["time"], df["T_surface_predicted"], label="推定（表面）", linestyle="--")
+    ax.set_xlabel("時間 [s]")
+    ax.set_ylabel("温度 [℃]")
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
+
+    # -----------------------------
+    # 結果テーブル
+    # -----------------------------
+    st.subheader("📋 推定データの一部")
+    st.dataframe(df[["time", "T_internal", "T_internal_corrected", "T_surface", "T_surface_predicted"]].head(10))
+
+    # -----------------------------
+    # ダウンロードボタン
+    # -----------------------------
+    st.download_button(
+        label="📥 結果をCSVでダウンロード",
+        data=df.to_csv(index=False).encode('utf-8'),
+        file_name="predicted_temperatures.csv",
+        mime='text/csv'
+    )
