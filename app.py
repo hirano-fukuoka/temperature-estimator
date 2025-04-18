@@ -7,11 +7,13 @@ from sklearn.linear_model import LinearRegression
 # ページ設定
 # -----------------------------
 st.set_page_config(page_title="金型表面温度推定アプリ", layout="wide")
-st.title("🌡️ 金型内部温度から表面温度を推定するアプリ（傾き補正付き）")
+st.title("🌡️ 金型内部温度から表面温度を推定するアプリ")
 
 st.markdown("""
-このアプリでは、遅れのある熱電対の内部温度を補正し、  
-さらに変化率（温度の傾き）も考慮して、表面温度をより正確に推定します。  
+このアプリでは、熱電対による内部温度データから応答補正を行い、  
+さらに温度の変化率（傾き）も加味して、表面温度を推定します。
+
+**手動モードでは係数 `a`（温度）、`b`（傾き）、`c`（オフセット）を自由に指定できます。**
 """)
 
 # -----------------------------
@@ -73,36 +75,31 @@ if uploaded_file:
     st.sidebar.markdown(f"補正係数 α = `{alpha:.4f}`")
 
     # -----------------------------
-    # 応答補正処理
+    # 応答補正・変化率算出
     # -----------------------------
     df["T_internal_corrected"] = correct_response(df["T_internal"], alpha)
-
-    # -----------------------------
-    # 変化率の計算（温度の傾き）
-    # -----------------------------
     df["dT_dt"] = df["T_internal_corrected"].diff() / dt
     df.dropna(inplace=True)
 
     # -----------------------------
-    # 推定方法選択（自動 or 手動係数）
+    # 推定方法の選択
     # -----------------------------
     st.sidebar.header("🛠 表面温度推定モード")
     manual_mode = st.sidebar.checkbox("手動で係数を指定する", value=False)
 
     if manual_mode:
-        a_coeff = st.sidebar.number_input("傾き係数 a（温度）", value=1.0, step=0.1, format="%.2f")
-        b_coeff = st.sidebar.number_input("傾き係数 b（変化率）", value=0.0, step=0.1, format="%.2f")
-        offset = st.sidebar.number_input("オフセット c", value=0.0, step=0.1, format="%.2f")
+        a = st.sidebar.number_input("温度係数 a", value=1.0, step=0.1, format="%.2f")
+        b = st.sidebar.number_input("傾き係数 b（dT/dt）", value=0.0, step=0.1, format="%.2f")
+        c = st.sidebar.number_input("オフセット c", value=0.0, step=0.1, format="%.2f")
 
-        df["T_surface_predicted"] = (
-            a_coeff * df["T_internal_corrected"] + b_coeff * df["dT_dt"] + offset
-        )
-        st.info(f"📌 補正式: `T_surface = {a_coeff} × T + {b_coeff} × dT/dt + {offset}`")
+        df["T_surface_predicted"] = a * df["T_internal_corrected"] + b * df["dT_dt"] + c
+
+        st.info(f"📌 補正式: `T_surface = {a} × T + {b} × dT/dt + {c}`")
     else:
         model = LinearRegression()
         model.fit(df[["T_internal_corrected", "dT_dt"]], df["T_surface"])
         df["T_surface_predicted"] = model.predict(df[["T_internal_corrected", "dT_dt"]])
-        st.success("✅ 自動回帰で表面温度を推定しました")
+        st.success("✅ 自動回帰モデルで表面温度を推定しました")
 
     # -----------------------------
     # グラフ表示
@@ -110,7 +107,7 @@ if uploaded_file:
     st.subheader("📊 推定結果グラフ")
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
-    ax.plot(df["time"], df["T_surface_predicted"], label="推定（補正+傾き）", linestyle="--")
+    ax.plot(df["time"], df["T_surface_predicted"], label="推定（補正＋傾き）", linestyle="--")
     ax.set_xlabel("時間 [s]")
     ax.set_ylabel("温度 [℃]")
     ax.legend()
@@ -118,7 +115,7 @@ if uploaded_file:
     st.pyplot(fig)
 
     # -----------------------------
-    # データ表示＆CSV出力
+    # テーブル表示＆CSVダウンロード
     # -----------------------------
     st.subheader("📋 推定データの一部")
     st.dataframe(df[["time", "T_internal", "T_internal_corrected", "dT_dt", "T_surface", "T_surface_predicted"]].head(10))
