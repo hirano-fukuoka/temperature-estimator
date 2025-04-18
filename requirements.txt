@@ -2,4 +2,9 @@ streamlit
 pandas
 matplotlib
 scikit-learn
-openpyxl  # Excel読み込み用
+openpyxl  # Excel読み込み用streamlit
+pandas
+matplotlib
+scikit-learn
+openpyxl
+
