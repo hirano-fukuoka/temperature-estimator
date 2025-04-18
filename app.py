@@ -67,7 +67,7 @@ if uploaded_file:
     # -----------------------------
     st.sidebar.header("📐 応答補正パラメータ")
     tau = st.sidebar.slider("熱電対の応答遅れ τ [秒]", 1.0, 10.0, 5.0)
-    dt = st.sidebar.slider("サンプリング間隔 Δt [秒]", 0.5, 5.0, 1.0)
+    dt = st.sidebar.number_input("サンプリング間隔 Δt [秒]", min_value=0.01, max_value=1.0, value=0.1, step=0.01, format="%.2f")
     alpha = dt / (tau + dt)
     st.sidebar.write(f"補正係数 α = `{alpha:.3f}`")
 
