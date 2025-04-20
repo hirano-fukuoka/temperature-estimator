@@ -8,14 +8,13 @@ from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
 
 st.set_page_config(page_title="完全安定版 温度補正アプリ", layout="wide")
-st.title("📊 完全安定版：ヘッダー指定 + β(t)補正 + DTW + 推定")
+st.title("🌡 Arrow対応 + β(t)補正 + DTW + 推定式最適化 完全版")
 
 uploaded_file = st.file_uploader("📤 ファイルをアップロード (CSV または Excel)", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # ヘッダー行の指定
     st.sidebar.header("🗂 ヘッダー行の指定")
-    header_row = st.sidebar.number_input("ヘッダーの行番号（最初が 0）", min_value=0, max_value=50, value=0, step=1)
+    header_row = st.sidebar.number_input("ヘッダーの行番号（0-based）", min_value=0, max_value=50, value=0, step=1)
 
     try:
         if uploaded_file.name.endswith(".csv"):
@@ -23,7 +22,7 @@ if uploaded_file:
         else:
             df_raw = pd.read_excel(uploaded_file, header=header_row, engine="openpyxl")
     except Exception as e:
-        st.error(f"❌ ファイル読み込みエラー: {e}")
+        st.error(f"❌ 読み込みエラー: {e}")
         st.stop()
 
     st.subheader("🔍 アップロード内容")
@@ -32,18 +31,17 @@ if uploaded_file:
     except:
         st.write(df_raw.to_string())
 
-    # 列選択
-    st.sidebar.header("📋 列の選択")
+    st.sidebar.header("📋 データ列の選択")
     cols = df_raw.columns.tolist()
     col_time = st.sidebar.selectbox("時間列", cols)
     col_internal = st.sidebar.selectbox("内部温度列", cols)
     col_surface = st.sidebar.selectbox("表面温度列", cols)
 
-    # 数値変換とNaN除去
+    # 明示的な数値変換と型固定
     df = pd.DataFrame()
-    df["time"] = pd.to_numeric(df_raw[col_time], errors="coerce")
-    df["T_internal"] = pd.to_numeric(df_raw[col_internal], errors="coerce")
-    df["T_surface"] = pd.to_numeric(df_raw[col_surface], errors="coerce")
+    df["time"] = pd.to_numeric(df_raw[col_time], errors="coerce").astype("float64")
+    df["T_internal"] = pd.to_numeric(df_raw[col_internal], errors="coerce").astype("float64")
+    df["T_surface"] = pd.to_numeric(df_raw[col_surface], errors="coerce").astype("float64")
     df.dropna(inplace=True)
 
     t = df["time"].values
@@ -52,15 +50,13 @@ if uploaded_file:
     dt = np.mean(np.diff(t))
 
     # β(t)補正
-    st.sidebar.header("⏳ β(t) 補正")
+    st.sidebar.header("⏳ β(t) 補正設定")
     peak_center = st.sidebar.slider("ピーク中心 [s]", float(t[0]), float(t[-1]), float(t[len(t)//2]), step=0.1)
     peak_width = st.sidebar.slider("ピーク幅 [s]", 0.1, 20.0, 5.0)
     beta_base = st.sidebar.slider("ベースβ", 0.5, 3.0, 1.2)
-    beta_peak = st.sidebar.slider("ピーク付近β", 0.1, 1.0, 0.6)
+    beta_peak = st.sidebar.slider("ピークβ", 0.1, 1.0, 0.6)
 
-    def beta_func(t):
-        return beta_peak + (beta_base - beta_peak) * np.exp(-((t - peak_center)**2) / (2 * peak_width**2))
-
+    def beta_func(t): return beta_peak + (beta_base - beta_peak) * np.exp(-((t - peak_center)**2)/(2 * peak_width**2))
     beta_vals = beta_func(t)
     t_scaled = np.cumsum(dt ** beta_vals)
 
@@ -79,12 +75,11 @@ if uploaded_file:
     df = df.iloc[:len(T_beta_scaled)].copy()
     df["T_beta_scaled"] = T_beta_scaled
 
-    # DTW整列
-    st.sidebar.header("🧠 DTW")
+    st.sidebar.header("🧠 DTW 整列")
     if st.sidebar.button("DTW補正を実行"):
-        with st.spinner("DTW処理中..."):
-            T1 = pd.to_numeric(df["T_beta_scaled"], errors="coerce").to_numpy().flatten()
-            T2 = pd.to_numeric(df["T_surface"], errors="coerce").to_numpy().flatten()
+        with st.spinner("DTW 処理中..."):
+            T1 = df["T_beta_scaled"].to_numpy().flatten()
+            T2 = df["T_surface"].to_numpy().flatten()
             mask = np.isfinite(T1) & np.isfinite(T2)
             T1_clean = T1[mask]
             T2_clean = T2[mask]
@@ -102,8 +97,7 @@ if uploaded_file:
 
         st.success(f"✅ DTW完了（距離: {distance:.2f}）")
 
-        # 最適化
-        st.sidebar.header("📐 補正式の最適化")
+        st.sidebar.header("📐 補正式 a×T + b×dT/dt + c")
         if st.sidebar.button("最適化を実行"):
             try:
                 df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -123,7 +117,7 @@ if uploaded_file:
                 st.info(f"a = {a_opt:.4f}, b = {b_opt:.4f}, c = {c_opt:.4f}")
 
                 # グラフ
-                st.subheader("📈 実測 vs 補正 vs 推定")
+                st.subheader("📈 結果グラフ")
                 fig, ax = plt.subplots(figsize=(10, 5))
                 ax.plot(df["time"], df["T_surface"], label="実測（表面）")
                 ax.plot(df["time"], df["T_dtw_aligned"], label="補正（内部）", linestyle=":")
@@ -133,12 +127,17 @@ if uploaded_file:
                 ax.legend()
                 st.pyplot(fig)
 
-                # 出力
+                # 出力：object型列はstringに変換してから保存
+                safe_df = df.copy()
+                for col in safe_df.columns:
+                    if safe_df[col].dtype == "object":
+                        safe_df[col] = safe_df[col].astype("string")
+
                 st.download_button(
-                    label="📥 結果をCSVでダウンロード",
-                    data=df.to_csv(index=False).encode("utf-8"),
-                    file_name="result_corrected_temperature.csv",
+                    "📥 推定結果をCSVでダウンロード",
+                    data=safe_df.to_csv(index=False).encode("utf-8"),
+                    file_name="corrected_temp_result.csv",
                     mime="text/csv"
                 )
             except Exception as e:
-                st.error(f"最適化中エラー: {e}")
+                st.error(f"最適化エラー: {e}")
