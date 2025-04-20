@@ -1,112 +1,120 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+from fastdtw import fastdtw
+from scipy.interpolate import interp1d
+from scipy.spatial.distance import euclidean
 from scipy.optimize import minimize
 
-# -----------------------------
-# ページ設定
-# -----------------------------
-st.set_page_config(page_title="応答補正付き表面温度推定", layout="wide")
-st.title("🌡️ 熱電対の応答補正＋最適推定アプリ")
+st.set_page_config(page_title="時間スパン補正アプリ", layout="wide")
+st.title("⏱ 時間スパン補正 & DTWによる表面温度推定")
 
 st.markdown("""
-内部温度（応答が遅い）を「応答補正」して、表面温度（高速応答）に近づけ、  
-その上で最適な係数で表面温度を推定します。
+このアプリは、**内部温度（遅応答）→ 表面温度（速応答）**への変換を次の方法で行います：
 
-**補正式： `T_surface ≈ a × 補正温度 + b × 補正dT/dt + c`**
+- `β(t)` による**時間スケーリングの局所変形**
+- **Dynamic Time Warping** による時系列整列
+- 温度スケーリング（a, b, c）による推定補正
 """)
 
-# -----------------------------
-# ファイルアップロード
-# -----------------------------
-uploaded_file = st.file_uploader("📤 CSV または Excel ファイルをアップロード", type=["csv", "xlsx"])
+# --- ファイル読み込み
+uploaded_file = st.file_uploader("📤 CSVまたはExcelファイルをアップロード", type=["csv", "xlsx"])
 
-# -----------------------------
-# メイン処理
-# -----------------------------
 if uploaded_file:
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        elif uploaded_file.name.endswith('.xlsx'):
-            df = pd.read_excel(uploaded_file, engine="openpyxl")
-        else:
-            st.error("CSV または Excel ファイルのみ対応しています。")
-            st.stop()
-    except Exception as e:
-        st.error(f"❌ 読み込みエラー: {e}")
-        st.stop()
+    if uploaded_file.name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file, engine="openpyxl")
 
     st.success("✅ ファイル読み込み完了")
-    st.subheader("データプレビュー")
     st.dataframe(df.head())
 
-    required_columns = {"time", "T_internal", "T_surface"}
-    if not required_columns.issubset(df.columns):
-        st.error(f"以下の列が必要です: {required_columns}")
+    # --- 必須列チェック
+    required = {"time", "T_internal", "T_surface"}
+    if not required.issubset(df.columns):
+        st.error(f"必要な列が含まれていません: {required}")
         st.stop()
 
-    df.dropna(subset=["T_internal", "T_surface"], inplace=True)
-
-    # -----------------------------
-    # 応答補正パラメータ入力
-    # -----------------------------
-    st.sidebar.header("📐 応答補正パラメータ")
-    tau = st.sidebar.number_input("熱電対の時定数 τ [秒]", min_value=0.01, max_value=10.0, value=3.0, step=0.1)
-    dt = st.sidebar.number_input("サンプリング間隔 Δt [秒]", min_value=0.01, max_value=1.0, value=0.1, step=0.01)
-
-    # -----------------------------
-    # 応答補正の実行： T_true ≈ T_measured + τ × dT/dt
-    # -----------------------------
-    df["dT_dt"] = df["T_internal"].diff() / dt
-    df["dT_dt_smooth"] = df["dT_dt"].rolling(window=5, center=True).mean()
-    df["T_internal_compensated"] = df["T_internal"] + tau * df["dT_dt_smooth"]
     df.dropna(inplace=True)
+    t = df["time"].values
+    T_internal = df["T_internal"].values
+    T_surface = df["T_surface"].values
 
-    # -----------------------------
-    # 最適化による係数推定
-    # -----------------------------
-    st.sidebar.header("⚙️ 自動最適化")
-    run_opt = st.sidebar.button("最適化を実行する")
+    dt = np.mean(np.diff(t))
 
-    if run_opt:
-        with st.spinner("最適化中..."):
+    # --- β(t) 時間スパン補正
+    st.sidebar.header("⏳ β(t) スパン補正設定")
+    peak_center = st.sidebar.slider("ピーク中心時間 [s]", float(t[0]), float(t[-1]), float(t[len(t)//2]), step=0.1)
+    peak_width = st.sidebar.slider("ピーク幅 [秒]", 0.1, 20.0, 5.0, step=0.1)
+    beta_base = st.sidebar.slider("ベースβ", 1.0, 2.0, 1.0, step=0.1)
+    beta_peak = st.sidebar.slider("ピーク付近β", 0.1, 1.0, 0.6, step=0.05)
 
-            def objective(params):
-                a, b, c = params
-                pred = a * df["T_internal_compensated"] + b * df["dT_dt_smooth"] + c
-                return ((df["T_surface"] - pred) ** 2).mean()
+    def beta_t(t):
+        return beta_peak + (beta_base - beta_peak) * np.exp(-((t - peak_center) ** 2) / (2 * peak_width ** 2))
 
-            res = minimize(objective, x0=[1.0, 0.0, 0.0], method='Nelder-Mead')
-            a_opt, b_opt, c_opt = res.x
-            df["T_surface_predicted"] = a_opt * df["T_internal_compensated"] + b_opt * df["dT_dt_smooth"] + c_opt
+    beta_vals = beta_t(t)
+    t_transformed = np.cumsum(dt ** beta_vals)  # 時間拡縮の累積（簡易変換）
 
-        st.success("✅ 最適化完了！")
-        st.info(f"📌 最適係数: `a = {a_opt:.4f}`、`b = {b_opt:.4f}`、`c = {c_opt:.4f}`")
+    # 補間して元の時間に再サンプリング
+    interp_func = interp1d(t_transformed, T_internal[:len(t_transformed)], fill_value="extrapolate")
+    T_beta_scaled = interp_func(t[:len(t_transformed)])
 
-        # -----------------------------
-        # グラフ描画
-        # -----------------------------
-        st.subheader("📊 実測 vs 補正 vs 推定")
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(df["time"], df["T_surface"], label="実測（表面）", linewidth=2)
-        ax.plot(df["time"], df["T_internal_compensated"], label="補正内部温度", linestyle=":")
-        ax.plot(df["time"], df["T_surface_predicted"], label="推定（補正＋最適化）", linestyle="--")
-        ax.set_xlabel("時間 [s]")
-        ax.set_ylabel("温度 [℃]")
-        ax.legend()
-        ax.grid(True)
-        st.pyplot(fig)
+    df = df.iloc[:len(T_beta_scaled)].copy()
+    df["T_beta_scaled"] = T_beta_scaled
 
-        # -----------------------------
-        # データ確認とダウンロード
-        # -----------------------------
-        st.subheader("📋 推定データ一部")
-        st.dataframe(df[["time", "T_internal", "T_internal_compensated", "T_surface", "T_surface_predicted"]].head(10))
+    # --- DTWで整列
+    st.sidebar.header("🧠 Dynamic Time Warping")
+    run_dtw = st.sidebar.button("DTW補正を実行")
 
-        st.download_button(
-            label="📥 結果をCSVでダウンロード",
-            data=df.to_csv(index=False).encode('utf-8'),
-            file_name="compensated_temperature_estimation.csv",
-            mime='text/csv'
-        )
+    if run_dtw:
+        with st.spinner("DTW処理中..."):
+            distance, path = fastdtw(df["T_beta_scaled"].values, df["T_surface"].values, dist=euclidean)
+            idx_internal, idx_surface = zip(*path)
+
+            t_surface_warped = df["time"].values[np.array(idx_surface)]
+            T_internal_warped = df["T_beta_scaled"].values[np.array(idx_internal)]
+
+            # 補間して元の時間に合わせる
+            dtw_interp = interp1d(t_surface_warped, T_internal_warped, kind="linear", fill_value="extrapolate")
+            df["T_internal_dtw"] = dtw_interp(df["time"])
+
+        st.success(f"DTW補正完了（距離: {distance:.4f}）")
+
+        # --- a, b, cの最適化
+        st.sidebar.header("📐 推定補正の最適化")
+        optimize_model = st.sidebar.button("最適化を実行")
+
+        if optimize_model:
+            with st.spinner("最適化中..."):
+
+                def objective(params):
+                    a, b, c = params
+                    pred = a * df["T_internal_dtw"] + b * np.gradient(df["T_internal_dtw"], dt) + c
+                    return np.mean((df["T_surface"] - pred) ** 2)
+
+                res = minimize(objective, x0=[1.0, 0.0, 0.0], method="Nelder-Mead")
+                a_opt, b_opt, c_opt = res.x
+                df["T_surface_predicted"] = a_opt * df["T_internal_dtw"] + b_opt * np.gradient(df["T_internal_dtw"], dt) + c_opt
+
+            st.success("最適化完了")
+            st.info(f"📌 a = {a_opt:.4f}, b = {b_opt:.4f}, c = {c_opt:.4f}")
+
+            # --- グラフ表示
+            st.subheader("📈 温度比較")
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(df["time"], df["T_surface"], label="実測（表面）")
+            ax.plot(df["time"], df["T_internal_dtw"], label="内部温度（DTW補正）", linestyle=":")
+            ax.plot(df["time"], df["T_surface_predicted"], label="推定温度", linestyle="--")
+            ax.set_xlabel("時間 [s]")
+            ax.set_ylabel("温度 [℃]")
+            ax.legend()
+            st.pyplot(fig)
+
+            # --- CSV出力
+            st.download_button(
+                label="📥 結果をCSVでダウンロード",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name="dtw_scaled_surface_prediction.csv",
+                mime="text/csv"
+            )
