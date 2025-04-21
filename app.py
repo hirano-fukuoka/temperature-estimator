@@ -2,90 +2,85 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from dtw import dtw
 from scipy.interpolate import interp1d
+from scipy.optimize import minimize
+from dtw import dtw
+from numpy.linalg import norm
 
-st.title("表面温度推定アプリ（完全安定版 v5）")
+st.set_page_config(page_title="表面温度推定アプリ v7", layout="wide")
+st.title("🌡 表面温度推定アプリ（完全安定版 v7）")
 
-# ヘッダー指定 & ファイルアップロード
-uploaded_file = st.file_uploader("CSVまたはExcelファイルをアップロードしてください", type=["csv", "xlsx"])
-header_row = st.number_input("ヘッダーの行番号（0開始）", min_value=0, value=0, step=1)
+uploaded_file = st.file_uploader("📤 CSV または Excel ファイルをアップロード", type=["csv", "xlsx"])
+header_row = st.number_input("ヘッダーの行番号（0ベース）", min_value=0, value=0, step=1)
 
-if uploaded_file is not None:
+if uploaded_file:
     try:
-        if uploaded_file.name.endswith('.csv'):
+        if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file, header=header_row)
         else:
-            df = pd.read_excel(uploaded_file, header=header_row)
+            df = pd.read_excel(uploaded_file, header=header_row, engine="openpyxl")
+        df.columns = df.columns.astype(str)
     except Exception as e:
-        st.error(f"データ読み込みエラー: {e}")
+        st.error(f"❌ ファイル読み込みエラー: {e}")
         st.stop()
 
-    df.columns = df.columns.astype(str)  # 列名が数値になるのを防ぐ
+    st.success("✅ 読み込み成功")
+    st.dataframe(df.astype(str))
 
-    st.success("データ読み込み成功")
-    st.dataframe(df.head())
+    st.sidebar.header("📋 列選択")
+    col_time = st.sidebar.selectbox("時間列", df.columns, index=0)
+    col_internal = st.sidebar.selectbox("内部温度列", df.columns, index=1)
+    col_surface = st.sidebar.selectbox("表面温度列", df.columns, index=2)
 
-    # 列の選択
-    col_time = st.selectbox("時間列を選択", df.columns, index=0)
-    col_internal = st.selectbox("内部温度列を選択", df.columns, index=1)
-    col_surface = st.selectbox("表面温度列を選択", df.columns, index=2)
-
-    # 数値データを抽出
     try:
-        time = pd.to_numeric(df[col_time], errors='coerce')
-        T_internal = pd.to_numeric(df[col_internal], errors='coerce')
-        T_surface = pd.to_numeric(df[col_surface], errors='coerce')
+        time = pd.to_numeric(df[col_time], errors="coerce")
+        T_internal = pd.to_numeric(df[col_internal], errors="coerce")
+        T_surface = pd.to_numeric(df[col_surface], errors="coerce")
     except Exception as e:
-        st.error(f"数値変換エラー: {e}")
+        st.error(f"❌ 数値変換エラー: {e}")
         st.stop()
 
-    # 応答補正設定
-    st.sidebar.subheader("🛠 応答補正設定")
-    sampling_interval = st.sidebar.number_input("サンプリング間隔 Δt [s]", min_value=0.001, value=0.1, step=0.01)
-    time_shift = st.sidebar.number_input("時間シフト β [倍]", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+    st.sidebar.header("🛠 応答補正設定")
+    dt = st.sidebar.number_input("サンプリング間隔 [s]", min_value=0.001, value=0.1, step=0.01)
 
-    # β(t) 時間圧縮：ピーク中心にスパン圧縮（簡易モデル）
-    beta_t = 1 / (1 + np.exp(-(time - time.mean()))) * time_shift
-
-    # 温度補正係数
-    st.sidebar.subheader("📐 温度補正式係数")
-    alpha = st.sidebar.number_input("温度係数 α", value=1.0)
-    beta = st.sidebar.number_input("傾き係数 β (dT/dt)", value=0.0)
+    st.sidebar.header("📐 推定式係数")
+    alpha = st.sidebar.number_input("係数 α（内部温度）", value=1.0)
+    beta = st.sidebar.number_input("係数 β（傾き）", value=0.0)
     offset = st.sidebar.number_input("オフセット c", value=0.0)
 
-    # 補正実行
+    st.sidebar.header("⏳ 時間スケーリング補正")
+    time_shift_scale = st.sidebar.slider("スケーリング倍率（スパン）", 0.1, 5.0, 1.0, step=0.1)
+    time_shift_offset = st.sidebar.slider("時間オフセット（シフト）[s]", -10.0, 10.0, 0.0, step=0.1)
+
     try:
-        dTdt = np.gradient(T_internal, sampling_interval)
-        T_surface_estimated = alpha * T_internal + beta * dTdt + offset
+        dTdt = np.gradient(T_internal, dt)
+        T_estimated = alpha * T_internal + beta * dTdt + offset
 
-        # 時間軸補正：補間 + スケーリング
-        f_interp = interp1d(time, T_surface_estimated, bounds_error=False, fill_value="extrapolate")
-        time_scaled = time * time_shift
-        T_surface_estimated_scaled = f_interp(time_scaled)
+        # 時間スケーリングとシフトの適用
+        time_scaled = (time + time_shift_offset) * time_shift_scale
+        interp_est = interp1d(time, T_estimated, bounds_error=False, fill_value="extrapolate")
+        T_est_scaled = interp_est(time_scaled)
 
-        # DTWによる補正（速度ベース）
-        u = pd.to_numeric(df[col_surface], errors="coerce").dropna().to_numpy().flatten()
-        v = pd.to_numeric(pd.Series(T_surface_estimated_scaled), errors="coerce").dropna().to_numpy().flatten()
+        # 実測と推定のDTW比較（要1D, NaN除去, 同長）
+        u_series = pd.to_numeric(df[col_surface], errors="coerce").dropna()
+        v_series = pd.Series(T_est_scaled).dropna()
+        min_len = min(len(u_series), len(v_series))
+        u = u_series.to_numpy().flatten()[:min_len]
+        v = v_series.to_numpy().flatten()[:min_len]
 
-        if len(u) != len(v):
-            min_len = min(len(u), len(v))
-            u = u[:min_len]
-            v = v[:min_len]
-
-        dtw_result = dtw(u, v)
-        dist = dtw_result.normalizedDistance
+        distance = dtw(u, v, dist=lambda x, y: norm(x - y)).normalizedDistance
 
         # グラフ表示
-        fig, ax = plt.subplots()
-        ax.plot(time, T_surface, label="表面温度 (実測)", linestyle="--", color='orange')
-        ax.plot(time, T_surface_estimated_scaled, label="表面温度 (推定)", color='blue')
+        st.subheader("📈 実測 vs 補正温度")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(time, T_surface, label="実測（表面）", linestyle="--", color="orange")
+        ax.plot(time, T_est_scaled, label="補正推定", color="blue")
         ax.set_xlabel("時間 [s]")
         ax.set_ylabel("温度 [℃]")
-        ax.set_title("推定結果グラフ")
         ax.legend()
         st.pyplot(fig)
 
-        st.info(f"📏 推定誤差 (DTW距離): {dist:.4f}")
+        st.info(f"📏 DTW距離（正規化）: {distance:.4f}")
+
     except Exception as e:
-        st.error(f"補正または描画処理エラー: {e}")
+        st.error(f"❌ 処理エラー: {type(e).__name__}: {e}")
