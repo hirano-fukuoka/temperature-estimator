@@ -68,7 +68,8 @@ if uploaded_file:
         u = u_series.to_numpy().flatten()[:min_len]
         v = v_series.to_numpy().flatten()[:min_len]
 
-        distance = dtw(u, v, dist=lambda x, y: norm(x - y)).normalizedDistance
+        distance = dtw(u, v).normalizedDistance
+
 
         # グラフ表示
         st.subheader("📈 実測 vs 補正温度")
