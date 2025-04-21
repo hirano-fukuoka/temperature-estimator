@@ -79,8 +79,8 @@ if uploaded_file:
     rmse = np.sqrt(np.mean((T_surface[mask] - T_est_scaled[mask])**2))
 
     # DTW
-    u = T_surface[mask].flatten()
-    v = T_est_scaled[mask].flatten()
+    u = T_surface[mask].to_numpy().flatten()
+    v = pd.Series(T_est_scaled[mask]).to_numpy().flatten()
     dtw_distance = dtw(u, v).normalizedDistance
 
     # グラフ描画
