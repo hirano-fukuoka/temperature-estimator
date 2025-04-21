@@ -9,8 +9,8 @@ from dtw import dtw
 from numpy.linalg import norm
 import io
 
-st.set_page_config(page_title="表面温度推定アプリ v10", layout="wide")
-st.title("🌡 表面温度推定アプリ（v10｜自動最適化＋エクスポート対応）")
+st.set_page_config(page_title="表面温度推定アプリ v11", layout="wide")
+st.title("🌡 表面温度推定アプリ（v11｜手動/自動 最適化対応）")
 
 uploaded_file = st.file_uploader("📤 CSV または Excel ファイルをアップロード", type=["csv", "xlsx"])
 header_row = st.number_input("ヘッダーの行番号（0ベース）", min_value=0, value=0, step=1)
@@ -47,43 +47,45 @@ if uploaded_file:
 
     optimize_all = st.sidebar.checkbox("📌 スパン・シフトも含めて自動最適化", value=True)
 
-    st.sidebar.markdown("🔎 最小二乗法で最適化中...")
+    if optimize_all:
+        st.sidebar.markdown("🔎 最小二乗法で最適化中...")
 
-    # 最小化する誤差関数
-    def loss(params):
-        a, b, c, scale, shift = params
-        dTdt = np.gradient(T_internal, dt)
-        T_pred = a * T_internal + b * dTdt + c
-        t_scaled = (time + shift) * scale
-        interp_func = interp1d(time, T_pred, bounds_error=False, fill_value="extrapolate")
-        T_scaled = interp_func(t_scaled)
-        mask = ~np.isnan(T_surface) & ~np.isnan(T_scaled)
-        return np.mean((T_surface[mask] - T_scaled[mask])**2)
+        def loss(params):
+            a, b, c, scale, shift = params
+            dTdt = np.gradient(T_internal, dt)
+            T_pred = a * T_internal + b * dTdt + c
+            t_scaled = (time + shift) * scale
+            interp_func = interp1d(time, T_pred, bounds_error=False, fill_value="extrapolate")
+            T_scaled = interp_func(t_scaled)
+            mask = ~np.isnan(T_surface) & ~np.isnan(T_scaled)
+            return np.mean((T_surface[mask] - T_scaled[mask])**2)
 
-    # 初期値・境界（shift は ±10秒想定）
-    x0 = [1.0, 0.0, 0.0, 1.0, 0.0]  # [a, b, c, scale, shift]
-    bounds = None  # シンプルな Nelder-Mead を使用（boundsは不要）
+        result = minimize(loss, x0=[1.0, 0.0, 0.0, 1.0, 0.0], method="Nelder-Mead")
+        a, b, c, scale, shift = result.x
+    else:
+        st.sidebar.markdown("✋ 手動パラメータ設定")
+        a = st.sidebar.number_input("a（内部温度係数）", value=1.0)
+        b = st.sidebar.number_input("b（傾き係数）", value=0.0)
+        c = st.sidebar.number_input("c（オフセット）", value=0.0)
+        scale = st.sidebar.slider("スケーリング倍率（スパン）", 0.1, 5.0, 1.0, step=0.1)
+        shift = st.sidebar.slider("時間オフセット（シフト）[s]", -10.0, 10.0, 0.0, step=0.1)
 
-    result = minimize(loss, x0=x0, method="Nelder-Mead")
-    a, b, c, scale, shift = result.x
-
+    # 推定値算出
     dTdt = np.gradient(T_internal, dt)
     T_est = a * T_internal + b * dTdt + c
     t_scaled = (time + shift) * scale
     interp_func = interp1d(time, T_est, bounds_error=False, fill_value="extrapolate")
     T_est_scaled = interp_func(t_scaled)
 
-    # 精度指標
+    # マスクと指標計算
     mask = ~np.isnan(T_surface) & ~np.isnan(T_est_scaled)
-    r = np.corrcoef(T_surface[mask], T_est_scaled[mask])[0, 1]
-    rmse = np.sqrt(np.mean((T_surface[mask] - T_est_scaled[mask])**2))
-
-    # DTW
-    u = T_surface[mask].to_numpy().flatten()
-    v = pd.Series(T_est_scaled[mask]).to_numpy().flatten()
+    u = np.asarray(T_surface[mask]).flatten()
+    v = np.asarray(T_est_scaled[mask]).flatten()
+    r = np.corrcoef(u, v)[0, 1]
+    rmse = np.sqrt(np.mean((u - v) ** 2))
     dtw_distance = dtw(u, v).normalizedDistance
 
-    # グラフ描画
+    # グラフ
     st.subheader("📈 実測 vs 補正温度")
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(time, T_surface, label="実測（表面）", linestyle="--", color="orange")
@@ -93,17 +95,15 @@ if uploaded_file:
     ax.legend()
     st.pyplot(fig)
 
-    # 指標表示
-    st.markdown(f"### ✅ 最適パラメータ")
+    st.markdown(f"### ✅ 使用パラメータ")
     st.code(f"a = {a:.4f}, b = {b:.4f}, c = {c:.4f}, scale = {scale:.4f}, shift = {shift:.4f}")
     st.markdown(f"**📏 相関係数**: {r:.4f}  **RMSE**: {rmse:.4f}  **DTW距離**: {dtw_distance:.4f}")
 
-    # エクスポート
+    # ダウンロード
     result_df = pd.DataFrame([{
         "a": a, "b": b, "c": c,
         "scale": scale, "shift": shift,
         "r": r, "rmse": rmse, "dtw": dtw_distance
     }])
-
     csv = result_df.to_csv(index=False).encode("utf-8")
     st.download_button("📥 結果CSVをダウンロード", csv, file_name="最適化結果.csv", mime="text/csv")
