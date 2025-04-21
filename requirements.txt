@@ -1,10 +1,7 @@
 streamlit
 pandas
+numpy
 matplotlib
-scikit-learn
-openpyxl  # Excel読み込み用streamlit
-pandas
-matplotlib
-scikit-learn
+scipy
+dtaidistance
 openpyxl
-fastdtw
