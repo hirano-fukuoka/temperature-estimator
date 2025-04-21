@@ -2,150 +2,90 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from dtw import dtw
 from scipy.interpolate import interp1d
-from scipy.optimize import minimize
-from fastdtw import fastdtw
-from scipy.spatial.distance import euclidean
 
-st.set_page_config(page_title="完全安定版 v4 温度補正アプリ", layout="wide")
-st.title("🌡 完全安定版 v4：DTW 1D保証 & Arrow完全対策")
+st.title("表面温度推定アプリ（完全安定版 v5）")
 
-uploaded_file = st.file_uploader("📤 CSVまたはExcelファイルをアップロード", type=["csv", "xlsx"])
+# ヘッダー指定 & ファイルアップロード
+uploaded_file = st.file_uploader("CSVまたはExcelファイルをアップロードしてください", type=["csv", "xlsx"])
+header_row = st.number_input("ヘッダーの行番号（0開始）", min_value=0, value=0, step=1)
 
-if uploaded_file:
-    st.sidebar.header("🗂 ヘッダー行の指定")
-    header_row = st.sidebar.number_input("ヘッダーの行番号（最初が0）", min_value=0, max_value=50, value=0, step=1)
-
+if uploaded_file is not None:
     try:
-        if uploaded_file.name.endswith(".csv"):
-            df_raw = pd.read_csv(uploaded_file, header=header_row)
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, header=header_row)
         else:
-            df_raw = pd.read_excel(uploaded_file, header=header_row, engine="openpyxl")
+            df = pd.read_excel(uploaded_file, header=header_row)
     except Exception as e:
-        st.error(f"❌ ファイル読み込みエラー: {e}")
+        st.error(f"データ読み込みエラー: {e}")
         st.stop()
 
-    df_raw = df_raw.convert_dtypes()
+    df.columns = df.columns.astype(str)  # 列名が数値になるのを防ぐ
 
-    st.subheader("🔍 アップロード内容")
+    st.success("データ読み込み成功")
+    st.dataframe(df.head())
+
+    # 列の選択
+    col_time = st.selectbox("時間列を選択", df.columns, index=0)
+    col_internal = st.selectbox("内部温度列を選択", df.columns, index=1)
+    col_surface = st.selectbox("表面温度列を選択", df.columns, index=2)
+
+    # 数値データを抽出
     try:
-        st.dataframe(df_raw.astype(str))
+        time = pd.to_numeric(df[col_time], errors='coerce')
+        T_internal = pd.to_numeric(df[col_internal], errors='coerce')
+        T_surface = pd.to_numeric(df[col_surface], errors='coerce')
     except Exception as e:
-        st.warning("⚠️ 表示に失敗しました。代替表示を行います。")
-        st.write(df_raw.to_string())
-
-    st.sidebar.header("📋 列の選択")
-    cols = df_raw.columns.tolist()
-    col_time = st.sidebar.selectbox("時間列", cols)
-    col_internal = st.sidebar.selectbox("内部温度列", cols)
-    col_surface = st.sidebar.selectbox("表面温度列", cols)
-
-    df = pd.DataFrame()
-    df["time"] = pd.to_numeric(df_raw[col_time], errors="coerce").astype("float64")
-    df["T_internal"] = pd.to_numeric(df_raw[col_internal], errors="coerce").astype("float64")
-    df["T_surface"] = pd.to_numeric(df_raw[col_surface], errors="coerce").astype("float64")
-    df.dropna(inplace=True)
-
-    t = df["time"].values
-    T_internal = df["T_internal"].values
-    T_surface = df["T_surface"].values
-    dt = np.mean(np.diff(t))
-
-    st.sidebar.header("⏳ β(t)補正設定")
-    peak_center = st.sidebar.slider("ピーク中心 [s]", float(t[0]), float(t[-1]), float(t[len(t)//2]), step=0.1)
-    peak_width = st.sidebar.slider("ピーク幅 [s]", 0.1, 20.0, 5.0)
-    beta_base = st.sidebar.slider("ベースβ", 0.5, 3.0, 1.2)
-    beta_peak = st.sidebar.slider("ピークβ", 0.1, 1.0, 0.6)
-
-    def beta_func(t): return beta_peak + (beta_base - beta_peak) * np.exp(-((t - peak_center)**2)/(2 * peak_width**2))
-    beta_vals = beta_func(t)
-    t_scaled = np.cumsum(dt ** beta_vals)
-
-    min_len = min(len(t_scaled), len(T_internal))
-    t_scaled = t_scaled[:min_len]
-    T_internal = T_internal[:min_len]
-    t_trimmed = t[:min_len]
-
-    try:
-        interp_beta = interp1d(t_scaled, T_internal, kind="linear", fill_value="extrapolate", bounds_error=False)
-        T_beta_scaled = interp_beta(t_trimmed)
-    except Exception as e:
-        st.error(f"補間エラー（β補正）: {e}")
+        st.error(f"数値変換エラー: {e}")
         st.stop()
 
-    df = df.iloc[:len(T_beta_scaled)].copy()
-    df["T_beta_scaled"] = T_beta_scaled
+    # 応答補正設定
+    st.sidebar.subheader("🛠 応答補正設定")
+    sampling_interval = st.sidebar.number_input("サンプリング間隔 Δt [s]", min_value=0.001, value=0.1, step=0.01)
+    time_shift = st.sidebar.number_input("時間シフト β [倍]", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
 
-    st.sidebar.header("🧠 DTW 補正")
-    if st.sidebar.button("DTW補正を実行"):
-        with st.spinner("DTW実行中..."):
-            try:
-                T1 = pd.to_numeric(df["T_beta_scaled"], errors="coerce").astype("float64").to_numpy().ravel()
-                T2 = pd.to_numeric(df["T_surface"], errors="coerce").astype("float64").to_numpy().ravel()
+    # β(t) 時間圧縮：ピーク中心にスパン圧縮（簡易モデル）
+    beta_t = 1 / (1 + np.exp(-(time - time.mean()))) * time_shift
 
-                if T1.ndim != 1 or T2.ndim != 1:
-                    raise ValueError("DTW入力が1次元ではありません")
+    # 温度補正係数
+    st.sidebar.subheader("📐 温度補正式係数")
+    alpha = st.sidebar.number_input("温度係数 α", value=1.0)
+    beta = st.sidebar.number_input("傾き係数 β (dT/dt)", value=0.0)
+    offset = st.sidebar.number_input("オフセット c", value=0.0)
 
-                mask = np.isfinite(T1) & np.isfinite(T2)
-                T1_clean = T1[mask]
-                T2_clean = T2[mask]
+    # 補正実行
+    try:
+        dTdt = np.gradient(T_internal, sampling_interval)
+        T_surface_estimated = alpha * T_internal + beta * dTdt + offset
 
-                if len(T1_clean) == 0 or len(T2_clean) == 0:
-                    raise ValueError("DTW入力が空です")
+        # 時間軸補正：補間 + スケーリング
+        f_interp = interp1d(time, T_surface_estimated, bounds_error=False, fill_value="extrapolate")
+        time_scaled = time * time_shift
+        T_surface_estimated_scaled = f_interp(time_scaled)
 
-                distance, path = fastdtw(T1_clean, T2_clean, dist=euclidean)
-                idx_i, idx_s = zip(*path)
-                t_warped = df["time"].values[np.array(idx_s)]
-                T_aligned = df["T_beta_scaled"].values[np.array(idx_i)]
-                interp_dtw = interp1d(t_warped, T_aligned, kind="linear", fill_value="extrapolate", bounds_error=False)
-                df["T_dtw_aligned"] = interp_dtw(df["time"])
+        # DTWによる補正（速度ベース）
+        u = T_surface.dropna().values.flatten()
+        v = T_surface_estimated_scaled.dropna().values.flatten()
 
-            except Exception as e:
-                st.error(f"❌ DTW処理エラー: {type(e).__name__}: {e}")
-                st.stop()
+        if len(u) != len(v):
+            min_len = min(len(u), len(v))
+            u = u[:min_len]
+            v = v[:min_len]
 
-        st.success(f"✅ DTW完了（距離: {distance:.2f}）")
+        dtw_result = dtw(u, v)
+        dist = dtw_result.normalizedDistance
 
-        st.sidebar.header("📐 補正式の最適化")
-        if st.sidebar.button("最適化を実行"):
-            try:
-                df.replace([np.inf, -np.inf], np.nan, inplace=True)
-                df.dropna(inplace=True)
+        # グラフ表示
+        fig, ax = plt.subplots()
+        ax.plot(time, T_surface, label="表面温度 (実測)", linestyle="--", color='orange')
+        ax.plot(time, T_surface_estimated_scaled, label="表面温度 (推定)", color='blue')
+        ax.set_xlabel("時間 [s]")
+        ax.set_ylabel("温度 [℃]")
+        ax.set_title("推定結果グラフ")
+        ax.legend()
+        st.pyplot(fig)
 
-                dTdt = np.gradient(df["T_dtw_aligned"], dt)
-
-                def objective(params):
-                    a, b, c = params
-                    pred = a * df["T_dtw_aligned"] + b * dTdt + c
-                    return np.mean((df["T_surface"] - pred) ** 2)
-
-                res = minimize(objective, x0=[1.0, 0.0, 0.0], method="Nelder-Mead")
-                a_opt, b_opt, c_opt = res.x
-
-                df["T_predicted"] = a_opt * df["T_dtw_aligned"] + b_opt * dTdt + c_opt
-
-                st.success("📌 最適化完了")
-                st.info(f"a = {a_opt:.4f}, b = {b_opt:.4f}, c = {c_opt:.4f}")
-
-                fig, ax = plt.subplots(figsize=(10, 5))
-                ax.plot(df["time"], df["T_surface"], label="実測（表面）")
-                ax.plot(df["time"], df["T_dtw_aligned"], label="補正（内部）", linestyle=":")
-                ax.plot(df["time"], df["T_predicted"], label="推定温度", linestyle="--")
-                ax.set_xlabel("時間 [s]")
-                ax.set_ylabel("温度 [℃]")
-                ax.legend()
-                st.pyplot(fig)
-
-                df_export = df.copy()
-                for col in df_export.columns:
-                    if df_export[col].dtype == "object":
-                        df_export[col] = df_export[col].astype("string")
-
-                st.download_button(
-                    "📥 結果CSVダウンロード",
-                    data=df_export.to_csv(index=False).encode("utf-8"),
-                    file_name="temperature_result_v4.csv",
-                    mime="text/csv"
-                )
-            except Exception as e:
-                st.error(f"❌ 最適化エラー: {type(e).__name__}: {e}")
+        st.info(f"📏 推定誤差 (DTW距離): {dist:.4f}")
+    except Exception as e:
+        st.error(f"補正または描画処理エラー: {e}")
