@@ -65,8 +65,8 @@ if uploaded_file is not None:
         T_surface_estimated_scaled = f_interp(time_scaled)
 
         # DTWによる補正（速度ベース）
-        u = T_surface.dropna().values.flatten()
-        v = T_surface_estimated_scaled.dropna().values.flatten()
+        u = pd.to_numeric(df[col_surface], errors="coerce").dropna().to_numpy().flatten()
+        v = pd.to_numeric(pd.Series(T_surface_estimated_scaled), errors="coerce").dropna().to_numpy().flatten()
 
         if len(u) != len(v):
             min_len = min(len(u), len(v))
