@@ -28,18 +28,26 @@ st.title("🌡️ T_surface 予測アプリ（熱電対 → ファイバー型�
 
 # 1. 学習用データのアップロード
 st.header("1️⃣ 学習データをアップロード（T_internal, T_surface を含む）")
-train_file = st.file_uploader("学習用CSVファイル", type="csv", key="train")
+train_files = st.file_uploader("学習用CSVファイル（複数選択可）", type="csv", key="train", accept_multiple_files=True)
 
 model = None
-if train_file:
-    train_df = pd.read_csv(train_file)
-    if "T_internal" in train_df.columns and "T_surface" in train_df.columns:
-        X_train, y_train = prepare_train_data(train_df)
+if train_files:
+    dfs = []
+    for f in train_files:
+        df = pd.read_csv(f)
+        if "T_internal" in df.columns and "T_surface" in df.columns:
+            dfs.append(df)
+        else:
+            st.warning(f"{f.name} に必要な列が見つかりません。スキップします。")
+
+    if dfs:
+        combined_df = pd.concat(dfs, ignore_index=True)
+        X_train, y_train = prepare_train_data(combined_df)
         model = RandomForestRegressor(n_estimators=100, random_state=42)
         model.fit(X_train, y_train)
-        st.success("✅ 学習が完了しました")
+        st.success(f"✅ 学習が完了しました（{len(dfs)} ファイルから {len(X_train)} サンプル）")
     else:
-        st.error("T_internal と T_surface の両方の列が必要です")
+        st.error("有効な学習データが見つかりませんでした。")
 
 # 2. 予測対象データのアップロード
 st.header("2️⃣ 予測用データをアップロード（T_internal 必須）")
